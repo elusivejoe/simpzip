@@ -1,6 +1,6 @@
 use std::env;
-use std::fs::{File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::fs::File;
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
 
 mod read_convenience;
 use read_convenience::{read_to, stream_current_position, stream_length};
@@ -9,10 +9,20 @@ mod zip_feature_versions;
 mod zip_signatures;
 
 mod zip_structs;
-use zip_structs::{LocalFileHeader, CentralDirFileHeader, EndOfCentralDir};
+use zip_structs::{CentralDirFileHeader, EndOfCentralDir, LocalFileHeader};
 
 mod args_parser;
-use args_parser::{parse_args};
+use args_parser::parse_args;
+use std::path::Path;
+use std::time::Instant;
+
+extern crate dir_diff;
+
+/*TODO: refactoring:
+-- functions that read into structs should be associated with those structs
+-- those structs have to be moved into their own files (?)
+-- need to rethink the source tree structure
+*/
 
 fn read_signature<T: Read>(reader: &mut T) -> std::io::Result<u32> {
     let mut bytes = [0u8; 4];
@@ -24,7 +34,7 @@ fn read_signature<T: Read>(reader: &mut T) -> std::io::Result<u32> {
 fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<LocalFileHeader> {
     const FIRST_CHUNK_SIZE: usize = 34;
 
-    let mut bytes= [0; FIRST_CHUNK_SIZE];
+    let mut bytes = [0; FIRST_CHUNK_SIZE];
 
     reader.read_exact(&mut bytes)?;
 
@@ -34,17 +44,17 @@ fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<Loc
     let file_name_len;
 
     let result = LocalFileHeader {
-        version_to_extract:  {
+        version_to_extract: {
             ver_to_extract = read_to::<u16>(&bytes, &mut offset)?;
 
             ver_to_extract
         },
 
-        general_bit_flag:   read_to::<u16>(&bytes, &mut offset)?,
+        general_bit_flag: read_to::<u16>(&bytes, &mut offset)?,
         compression_method: read_to::<u16>(&bytes, &mut offset)?,
         last_mod_file_time: read_to::<u16>(&bytes, &mut offset)?,
         last_mod_file_date: read_to::<u16>(&bytes, &mut offset)?,
-        crc_32:             read_to::<u32>(&bytes, &mut offset)?,
+        crc_32: read_to::<u32>(&bytes, &mut offset)?,
 
         compressed_size: {
             if ver_to_extract >= zip_feature_versions::ZIP64 {
@@ -79,7 +89,7 @@ fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<Loc
             reader.read_exact(&mut bytes)?;
 
             String::from_utf8(bytes).unwrap() //TODO: convert to I/O Error
-        }
+        },
     };
 
     reader.seek(SeekFrom::Current(result.extra_field_length as i64))?;
@@ -87,7 +97,9 @@ fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<Loc
     Ok(result)
 }
 
-fn read_central_dir_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<CentralDirFileHeader> {
+fn read_central_dir_file_header<T: Read + Seek>(
+    reader: &mut T,
+) -> std::io::Result<CentralDirFileHeader> {
     const FIRST_CHUNK_SIZE: usize = 50;
 
     let mut bytes = [0; FIRST_CHUNK_SIZE];
@@ -103,17 +115,17 @@ fn read_central_dir_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Resu
 
     let result = CentralDirFileHeader {
         version_made_by: read_to::<u16>(&bytes, &mut offset)?,
-        version_to_extract:  {
+        version_to_extract: {
             ver_to_extract = read_to::<u16>(&bytes, &mut offset)?;
 
             ver_to_extract
         },
 
-        general_bit_flag:   read_to::<u16>(&bytes, &mut offset)?,
+        general_bit_flag: read_to::<u16>(&bytes, &mut offset)?,
         compression_method: read_to::<u16>(&bytes, &mut offset)?,
         last_mod_file_time: read_to::<u16>(&bytes, &mut offset)?,
         last_mod_file_date: read_to::<u16>(&bytes, &mut offset)?,
-        crc_32:             read_to::<u32>(&bytes, &mut offset)?,
+        crc_32: read_to::<u32>(&bytes, &mut offset)?,
 
         compressed_size: {
             if ver_to_extract >= zip_feature_versions::ZIP64 {
@@ -153,16 +165,16 @@ fn read_central_dir_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Resu
             file_comment_len
         },
 
-        disk_number_start:       read_to::<u16>(&bytes, &mut offset)?,
-        internal_file_attribs:   read_to::<u16>(&bytes, &mut offset)?,
-        external_file_attribs:   read_to::<u32>(&bytes, &mut offset)?,
+        disk_number_start: read_to::<u16>(&bytes, &mut offset)?,
+        internal_file_attribs: read_to::<u16>(&bytes, &mut offset)?,
+        external_file_attribs: read_to::<u32>(&bytes, &mut offset)?,
         local_header_rel_offset: read_to::<u32>(&bytes, &mut offset)?,
 
         file_name: {
             let mut bytes = vec![0u8; file_name_len as usize];
             reader.read_exact(&mut bytes)?;
 
-            //skipping extra field
+            //TODO: use extra field; skipping it for now
             reader.seek(SeekFrom::Current(extra_field_len as i64))?;
 
             String::from_utf8(bytes).unwrap() //TODO: convert to I/O Error
@@ -173,13 +185,13 @@ fn read_central_dir_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Resu
             reader.read_exact(&mut bytes)?;
 
             String::from_utf8(bytes).unwrap() //TODO: convert to I/O Error
-        }
+        },
     };
 
     Ok(result)
 }
 
-fn read_read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndOfCentralDir> {
+fn read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndOfCentralDir> {
     const FIRST_CHUNK_SIZE: usize = 18;
 
     let mut bytes = [0; FIRST_CHUNK_SIZE];
@@ -191,11 +203,11 @@ fn read_read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndO
     let zip_file_comment_len;
 
     let result = EndOfCentralDir {
-        number_of_this_disk:                       read_to::<u16>(&bytes, &mut offset)?,
-        number_of_disk_with_start_central_dir:     read_to::<u16>(&bytes, &mut offset)?,
+        number_of_this_disk: read_to::<u16>(&bytes, &mut offset)?,
+        number_of_disk_with_start_central_dir: read_to::<u16>(&bytes, &mut offset)?,
         total_entries_in_central_dir_on_this_disk: read_to::<u16>(&bytes, &mut offset)?,
-        total_entries_in_central_dir:              read_to::<u16>(&bytes, &mut offset)?,
-        central_dir_size:                          read_to::<u32>(&bytes, &mut offset)?,
+        total_entries_in_central_dir: read_to::<u16>(&bytes, &mut offset)?,
+        central_dir_size: read_to::<u32>(&bytes, &mut offset)?,
         central_dir_offset_from_starting_disk_num: read_to::<u32>(&bytes, &mut offset)?,
 
         zip_file_comment_length: {
@@ -209,25 +221,35 @@ fn read_read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndO
             reader.read_exact(&mut bytes)?;
 
             String::from_utf8(bytes).unwrap() //TODO: convert to I/O Error
-        }
+        },
     };
 
     Ok(result)
 }
 
-fn read_file_data<T: Read>(reader: &mut T, data_size: &u64) -> std::io::Result<()> {
-    const CHUNK_SIZE: usize = 1024;
+fn read_file_data<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    data_size: &u64,
+) -> std::io::Result<()> {
+    const CHUNK_SIZE: usize = 1024 * 1024;
     let mut bytes_left = *data_size;
 
+    //TODO: verify checksum
     while bytes_left > 0 {
         let next_bytes = std::cmp::min(bytes_left, CHUNK_SIZE as u64);
 
         if next_bytes == CHUNK_SIZE as u64 {
             let mut bytes = [0u8; CHUNK_SIZE];
             reader.read_exact(&mut bytes)?;
+
+            writer.write(&bytes)?;
         } else {
+            //TODO: too many allocations here; consider passing reusable external buffer
             let mut bytes = vec![0u8; next_bytes as usize];
             reader.read_exact(&mut bytes)?;
+
+            writer.write(&bytes)?;
         }
 
         bytes_left -= next_bytes;
@@ -236,54 +258,139 @@ fn read_file_data<T: Read>(reader: &mut T, data_size: &u64) -> std::io::Result<(
     Ok(())
 }
 
-fn main() -> std::io::Result<()> {
-    let args = parse_args(&env::args().collect()).unwrap();
+fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
+    if let Some(_) = out_dir.read_dir()?.next() {
+        return Err(std::io::Error::new(
+            ErrorKind::Other,
+            "Output dir is not empty.",
+        ));
+    };
 
-    println!("Source ZIP: {}\n", args.path);
+    let src_file = File::open(src_file)?;
+    let mut src_file_reader = BufReader::new(src_file);
 
-    let zip_file = File::open(&args.path)?;
-    let mut buf_reader = BufReader::new(zip_file);
-    let stream_len = stream_length(&mut buf_reader)?;
+    let stream_len = stream_length(&mut src_file_reader)?;
 
-    while stream_current_position(&mut buf_reader)? < stream_len {
-        let signature = read_signature(&mut buf_reader)?;
+    while stream_current_position(&mut src_file_reader)? < stream_len {
+        let signature = read_signature(&mut src_file_reader)?;
 
         if signature == zip_signatures::SIGNATURE_FILE_HEADER {
-            match read_local_file_header(&mut buf_reader) {
+            match read_local_file_header(&mut src_file_reader) {
                 Ok(local_file_header) => {
-                    println!("{:#?}", local_file_header);
-                    read_file_data(&mut buf_reader, &local_file_header.compressed_size)?;
-                },
+                    if local_file_header.version_to_extract == zip_feature_versions::DIR {
+                        std::fs::create_dir(out_dir.join(local_file_header.file_name))?;
+                    } else {
+                        let mut out_file =
+                            File::create(out_dir.join(&local_file_header.file_name))?;
+
+                        let mut buf_writer = BufWriter::new(&mut out_file);
+
+                        //TODO: extremely inefficient on a large amount of small files
+                        read_file_data(
+                            &mut src_file_reader,
+                            &mut buf_writer,
+                            &local_file_header.compressed_size,
+                        )?;
+                    }
+                }
                 Err(err) => {
-                    println!("Error reading local file header. Reason: {}", err.to_string());
+                    println!(
+                        "Error reading local file header. Reason: {}",
+                        err.to_string()
+                    );
                 }
             }
         }
 
         if signature == zip_signatures::SIGNATURE_CENTRAL_DIR_HEADER {
-            match read_central_dir_file_header(&mut buf_reader) {
-                Ok(central_dir_file_header) => {
-                    println!("{:#?}", central_dir_file_header);
-                },
+            match read_central_dir_file_header(&mut src_file_reader) {
+                Ok(_central_dir_file_header) => {}
                 Err(err) => {
-                    println!("Error reading central dir file header. Reason: {}", err.to_string());
+                    println!(
+                        "Error reading central dir file header. Reason: {}",
+                        err.to_string()
+                    );
                 }
             }
         }
 
         if signature == zip_signatures::SIGNATURE_CENTRAL_DIR_END {
-            match read_read_end_of_central_dir(&mut buf_reader) {
-                Ok(end_of_central_dir) => {
-                    println!("{:#?}", end_of_central_dir);
-                },
+            match read_end_of_central_dir(&mut src_file_reader) {
+                Ok(_end_of_central_dir) => {}
                 Err(err) => {
-                    println!("Error reading end of central dir. Reason: {}", err.to_string());
+                    println!(
+                        "Error reading end of central dir. Reason: {}",
+                        err.to_string()
+                    );
                 }
             }
         }
-
-        println!("\nRead {} out of {}\n", stream_current_position(&mut buf_reader)?, stream_len);
     }
 
+    println!(
+        "Read {} out of {}",
+        stream_current_position(&mut src_file_reader)?,
+        stream_len
+    );
+
     Ok(())
+}
+
+fn main() -> std::io::Result<()> {
+    let args = parse_args(&env::args().collect()).unwrap();
+
+    println!("\nSource ZIP: {}", args.in_file);
+    println!("Output dir: {}\n", args.out_folder);
+
+    let out_folder = Path::new(&args.out_folder);
+
+    if out_folder.exists() && !out_folder.is_dir() {
+        panic!("Output dir is not a dir.");
+    } else if out_folder.exists() {
+        println!("Cleaning up the mess...");
+        std::fs::remove_dir_all(out_folder)?;
+    }
+
+    println!("Unpacking...\n");
+
+    let start_time = Instant::now();
+
+    std::fs::create_dir(out_folder)?;
+
+    unpack_archive(Path::new(&args.in_file), out_folder)?;
+
+    println!(
+        "Time spent: {} sec",
+        Instant::now().duration_since(start_time).as_secs()
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn unpack_store_0() {
+        let out_folder = Path::new("test-data/unpack_store_0/actual");
+
+        if out_folder.exists() && !out_folder.is_dir() {
+            assert!(false, "Output dir is not a dir.");
+        } else if out_folder.exists() {
+            std::fs::remove_dir_all(out_folder).unwrap();
+        }
+
+        std::fs::create_dir(out_folder).unwrap();
+
+        super::unpack_archive(Path::new("test-data/unpack_store_0/input.zip"), out_folder).unwrap();
+
+        assert!(!dir_diff::is_different(
+            out_folder,
+            Path::new("test-data/unpack_store_0/expected")
+        )
+        .unwrap());
+
+        std::fs::remove_dir_all(out_folder).unwrap();
+    }
 }

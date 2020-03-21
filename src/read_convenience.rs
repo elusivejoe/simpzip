@@ -1,6 +1,6 @@
-use std::mem::size_of;
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::mem::size_of;
 
 pub trait FromLeBytes {
     fn from(bytes: &[u8]) -> Self;
@@ -30,12 +30,8 @@ pub fn read_to<T: FromLeBytes>(bytes: &[u8], offset: &mut usize) -> std::io::Res
     let end = *offset;
 
     match bytes[begin..end].try_into() {
-        Ok(slice) => {
-            Ok(T::from(slice))
-        }
-        Err(err) => {
-            Err(Error::new(ErrorKind::Other, err.to_string()))
-        }
+        Ok(slice) => Ok(T::from(slice)),
+        Err(err) => Err(Error::new(ErrorKind::Other, err.to_string())),
     }
 }
 
@@ -62,7 +58,7 @@ mod tests {
     fn read_to_u16() {
         let bytes: [u8; 8] = [82, 35, 155, 154, 255, 255, 0, 54];
 
-        let mut offset : usize = 0;
+        let mut offset: usize = 0;
 
         let word1 = read_to::<u16>(&bytes, &mut offset).unwrap_or(0);
         let word2 = read_to::<u16>(&bytes, &mut offset).unwrap_or(0);
@@ -79,7 +75,7 @@ mod tests {
     fn read_to_u32() {
         let bytes: [u8; 8] = [178, 65, 222, 252, 255, 255, 255, 255];
 
-        let mut offset : usize = 0;
+        let mut offset: usize = 0;
 
         let dword1 = read_to::<u32>(&bytes, &mut offset).unwrap_or(0);
         let dword2 = read_to::<u32>(&bytes, &mut offset).unwrap_or(0);
@@ -90,9 +86,11 @@ mod tests {
 
     #[test]
     fn read_to_u64() {
-        let bytes: [u8; 16] = [7, 255, 181, 37, 199, 37, 40, 13, 255, 255, 255, 255, 255, 255, 255, 255];
+        let bytes: [u8; 16] = [
+            7, 255, 181, 37, 199, 37, 40, 13, 255, 255, 255, 255, 255, 255, 255, 255,
+        ];
 
-        let mut offset : usize = 0;
+        let mut offset: usize = 0;
 
         let qword1 = read_to::<u64>(&bytes, &mut offset).unwrap_or(0);
         let qword2 = read_to::<u64>(&bytes, &mut offset).unwrap_or(0);
@@ -103,12 +101,10 @@ mod tests {
 
     #[test]
     fn stream_navigation() {
-        let test_file = File::open("test-data/streams.txt");
+        let test_file = File::open("test-data/streams/streams_0.txt");
 
         let mut reader = match test_file {
-            Ok(file) => {
-                BufReader::new(file)
-            },
+            Ok(file) => BufReader::new(file),
             Err(_) => {
                 assert!(false, "Couldn't open test data file.");
                 BufReader::new(File::open("").unwrap())
@@ -120,7 +116,7 @@ mod tests {
         assert_eq!(stream_len, 8);
 
         match reader.read_exact(&mut [0u8; 4]) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 assert!(false, "Couldn't navigate over the stream.");
             }
