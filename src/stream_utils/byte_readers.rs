@@ -1,5 +1,5 @@
 use std::convert::TryInto;
-use std::io::{Error, ErrorKind, Seek, SeekFrom};
+use std::io::{Error, ErrorKind};
 use std::mem::size_of;
 
 pub trait FromLeBytes {
@@ -35,24 +35,9 @@ pub fn read_to<T: FromLeBytes>(bytes: &[u8], offset: &mut usize) -> std::io::Res
     }
 }
 
-pub fn stream_current_position<T: Seek>(stream: &mut T) -> std::io::Result<u64> {
-    stream.seek(SeekFrom::Current(0))
-}
-
-pub fn stream_length<T: Seek>(stream: &mut T) -> std::io::Result<u64> {
-    let old_pos = stream_current_position(stream)?;
-    let len = stream.seek(SeekFrom::End(0))?;
-    stream.seek(SeekFrom::Start(old_pos))?;
-
-    Ok(len)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
-    use std::io::{BufReader, Read};
-
-    use crate::read_convenience::{read_to, stream_current_position, stream_length};
+    use crate::stream_utils::byte_readers::read_to;
 
     #[test]
     fn read_to_u16() {
@@ -97,33 +82,5 @@ mod tests {
 
         assert_eq!(qword1, 948049258822893319);
         assert_eq!(qword2, 18446744073709551615u64);
-    }
-
-    #[test]
-    fn stream_navigation() {
-        let test_file = File::open("test-data/streams/streams_0.txt");
-
-        let mut reader = match test_file {
-            Ok(file) => BufReader::new(file),
-            Err(_) => {
-                assert!(false, "Couldn't open test data file.");
-                BufReader::new(File::open("").unwrap())
-            }
-        };
-
-        let stream_len = stream_length(&mut reader).unwrap_or(0);
-
-        assert_eq!(stream_len, 8);
-
-        match reader.read_exact(&mut [0u8; 4]) {
-            Ok(_) => {}
-            Err(_) => {
-                assert!(false, "Couldn't navigate over the stream.");
-            }
-        }
-
-        let stream_current_pos = stream_current_position(&mut reader).unwrap_or(0);
-
-        assert_eq!(stream_current_pos, 4);
     }
 }

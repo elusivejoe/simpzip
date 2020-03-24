@@ -16,7 +16,7 @@ pub fn parse_args(args: &Vec<String>) -> Result<RunArguments, &'static str> {
 
 #[cfg(test)]
 mod tests {
-    use crate::args_parser::parse_args;
+    use crate::args::input_parser::parse_args;
 
     #[test]
     fn parse_src_file_path() {

@@ -1,22 +1,18 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
-
-mod read_convenience;
-use read_convenience::{read_to, stream_current_position, stream_length};
-
-mod zip_feature_versions;
-mod zip_signatures;
-
-mod zip_structs;
-use zip_structs::{CentralDirFileHeader, EndOfCentralDir, LocalFileHeader};
-
-mod args_parser;
-use args_parser::parse_args;
 use std::path::Path;
 use std::time::Instant;
 
-extern crate dir_diff;
+mod args;
+use args::input_parser;
+
+mod zip;
+use zip::signatures;
+use zip::structs::{CentralDirFileHeader, EndOfCentralDir, LocalFileHeader};
+
+mod stream_utils;
+use stream_utils::{byte_readers, stream_nav};
 
 /*TODO: refactoring:
 -- functions that read into structs should be associated with those structs
@@ -28,7 +24,7 @@ fn read_signature<T: Read>(reader: &mut T) -> std::io::Result<u32> {
     let mut bytes = [0u8; 4];
     reader.read_exact(&mut bytes)?;
 
-    read_to::<u32>(&bytes, &mut 0)
+    byte_readers::read_to::<u32>(&bytes, &mut 0)
 }
 
 fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<LocalFileHeader> {
@@ -45,43 +41,43 @@ fn read_local_file_header<T: Read + Seek>(reader: &mut T) -> std::io::Result<Loc
 
     let result = LocalFileHeader {
         version_to_extract: {
-            ver_to_extract = read_to::<u16>(&bytes, &mut offset)?;
+            ver_to_extract = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             ver_to_extract
         },
 
-        general_bit_flag: read_to::<u16>(&bytes, &mut offset)?,
-        compression_method: read_to::<u16>(&bytes, &mut offset)?,
-        last_mod_file_time: read_to::<u16>(&bytes, &mut offset)?,
-        last_mod_file_date: read_to::<u16>(&bytes, &mut offset)?,
-        crc_32: read_to::<u32>(&bytes, &mut offset)?,
+        general_bit_flag: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        compression_method: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        last_mod_file_time: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        last_mod_file_date: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        crc_32: byte_readers::read_to::<u32>(&bytes, &mut offset)?,
 
         compressed_size: {
-            if ver_to_extract >= zip_feature_versions::ZIP64 {
-                read_to::<u64>(&bytes, &mut offset)?
+            if ver_to_extract >= zip::feature_versions::ZIP64 {
+                byte_readers::read_to::<u64>(&bytes, &mut offset)?
             } else {
-                read_to::<u32>(&bytes, &mut offset)? as u64
+                byte_readers::read_to::<u32>(&bytes, &mut offset)? as u64
             }
         },
 
         uncompressed_size: {
-            if ver_to_extract >= zip_feature_versions::ZIP64 {
-                read_to::<u64>(&bytes, &mut offset)?
+            if ver_to_extract >= zip::feature_versions::ZIP64 {
+                byte_readers::read_to::<u64>(&bytes, &mut offset)?
             } else {
-                read_to::<u32>(&bytes, &mut offset)? as u64
+                byte_readers::read_to::<u32>(&bytes, &mut offset)? as u64
             }
         },
 
         file_name_length: {
-            file_name_len = read_to::<u16>(&bytes, &mut offset)?;
+            file_name_len = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             file_name_len
         },
 
-        extra_field_length: read_to::<u16>(&bytes, &mut offset)?,
+        extra_field_length: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
 
         file_name: {
-            if ver_to_extract < zip_feature_versions::ZIP64 {
+            if ver_to_extract < zip::feature_versions::ZIP64 {
                 reader.seek(SeekFrom::Current(-8))?;
             }
 
@@ -114,61 +110,61 @@ fn read_central_dir_file_header<T: Read + Seek>(
     let file_comment_len;
 
     let result = CentralDirFileHeader {
-        version_made_by: read_to::<u16>(&bytes, &mut offset)?,
+        version_made_by: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
         version_to_extract: {
-            ver_to_extract = read_to::<u16>(&bytes, &mut offset)?;
+            ver_to_extract = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             ver_to_extract
         },
 
-        general_bit_flag: read_to::<u16>(&bytes, &mut offset)?,
-        compression_method: read_to::<u16>(&bytes, &mut offset)?,
-        last_mod_file_time: read_to::<u16>(&bytes, &mut offset)?,
-        last_mod_file_date: read_to::<u16>(&bytes, &mut offset)?,
-        crc_32: read_to::<u32>(&bytes, &mut offset)?,
+        general_bit_flag: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        compression_method: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        last_mod_file_time: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        last_mod_file_date: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        crc_32: byte_readers::read_to::<u32>(&bytes, &mut offset)?,
 
         compressed_size: {
-            if ver_to_extract >= zip_feature_versions::ZIP64 {
-                read_to::<u64>(&bytes, &mut offset)?
+            if ver_to_extract >= zip::feature_versions::ZIP64 {
+                byte_readers::read_to::<u64>(&bytes, &mut offset)?
             } else {
-                read_to::<u32>(&bytes, &mut offset)? as u64
+                byte_readers::read_to::<u32>(&bytes, &mut offset)? as u64
             }
         },
 
         uncompressed_size: {
-            if ver_to_extract >= zip_feature_versions::ZIP64 {
-                read_to::<u64>(&bytes, &mut offset)?
+            if ver_to_extract >= zip::feature_versions::ZIP64 {
+                byte_readers::read_to::<u64>(&bytes, &mut offset)?
             } else {
-                read_to::<u32>(&bytes, &mut offset)? as u64
+                byte_readers::read_to::<u32>(&bytes, &mut offset)? as u64
             }
         },
 
         file_name_length: {
-            if ver_to_extract < zip_feature_versions::ZIP64 as u16 {
+            if ver_to_extract < zip::feature_versions::ZIP64 as u16 {
                 reader.seek(SeekFrom::Current(-8))?;
             }
 
-            file_name_len = read_to::<u16>(&bytes, &mut offset)?;
+            file_name_len = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             file_name_len
         },
 
         extra_field_length: {
-            extra_field_len = read_to::<u16>(&bytes, &mut offset)?;
+            extra_field_len = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             extra_field_len
         },
 
         file_comment_length: {
-            file_comment_len = read_to::<u16>(&bytes, &mut offset)?;
+            file_comment_len = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             file_comment_len
         },
 
-        disk_number_start: read_to::<u16>(&bytes, &mut offset)?,
-        internal_file_attribs: read_to::<u16>(&bytes, &mut offset)?,
-        external_file_attribs: read_to::<u32>(&bytes, &mut offset)?,
-        local_header_rel_offset: read_to::<u32>(&bytes, &mut offset)?,
+        disk_number_start: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        internal_file_attribs: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        external_file_attribs: byte_readers::read_to::<u32>(&bytes, &mut offset)?,
+        local_header_rel_offset: byte_readers::read_to::<u32>(&bytes, &mut offset)?,
 
         file_name: {
             let mut bytes = vec![0u8; file_name_len as usize];
@@ -203,15 +199,21 @@ fn read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndOfCent
     let zip_file_comment_len;
 
     let result = EndOfCentralDir {
-        number_of_this_disk: read_to::<u16>(&bytes, &mut offset)?,
-        number_of_disk_with_start_central_dir: read_to::<u16>(&bytes, &mut offset)?,
-        total_entries_in_central_dir_on_this_disk: read_to::<u16>(&bytes, &mut offset)?,
-        total_entries_in_central_dir: read_to::<u16>(&bytes, &mut offset)?,
-        central_dir_size: read_to::<u32>(&bytes, &mut offset)?,
-        central_dir_offset_from_starting_disk_num: read_to::<u32>(&bytes, &mut offset)?,
+        number_of_this_disk: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        number_of_disk_with_start_central_dir: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        total_entries_in_central_dir_on_this_disk: byte_readers::read_to::<u16>(
+            &bytes,
+            &mut offset,
+        )?,
+        total_entries_in_central_dir: byte_readers::read_to::<u16>(&bytes, &mut offset)?,
+        central_dir_size: byte_readers::read_to::<u32>(&bytes, &mut offset)?,
+        central_dir_offset_from_starting_disk_num: byte_readers::read_to::<u32>(
+            &bytes,
+            &mut offset,
+        )?,
 
         zip_file_comment_length: {
-            zip_file_comment_len = read_to::<u16>(&bytes, &mut offset)?;
+            zip_file_comment_len = byte_readers::read_to::<u16>(&bytes, &mut offset)?;
 
             zip_file_comment_len
         },
@@ -269,15 +271,15 @@ fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
     let src_file = File::open(src_file)?;
     let mut src_file_reader = BufReader::new(src_file);
 
-    let stream_len = stream_length(&mut src_file_reader)?;
+    let stream_len = stream_nav::length(&mut src_file_reader)?;
 
-    while stream_current_position(&mut src_file_reader)? < stream_len {
+    while stream_nav::current_position(&mut src_file_reader)? < stream_len {
         let signature = read_signature(&mut src_file_reader)?;
 
-        if signature == zip_signatures::SIGNATURE_FILE_HEADER {
+        if signature == signatures::SIGNATURE_FILE_HEADER {
             match read_local_file_header(&mut src_file_reader) {
                 Ok(local_file_header) => {
-                    if local_file_header.version_to_extract == zip_feature_versions::DIR {
+                    if local_file_header.version_to_extract == zip::feature_versions::DIR {
                         std::fs::create_dir(out_dir.join(local_file_header.file_name))?;
                     } else {
                         let mut out_file =
@@ -302,7 +304,7 @@ fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
             }
         }
 
-        if signature == zip_signatures::SIGNATURE_CENTRAL_DIR_HEADER {
+        if signature == signatures::SIGNATURE_CENTRAL_DIR_HEADER {
             match read_central_dir_file_header(&mut src_file_reader) {
                 Ok(_central_dir_file_header) => {}
                 Err(err) => {
@@ -314,7 +316,7 @@ fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
             }
         }
 
-        if signature == zip_signatures::SIGNATURE_CENTRAL_DIR_END {
+        if signature == signatures::SIGNATURE_CENTRAL_DIR_END {
             match read_end_of_central_dir(&mut src_file_reader) {
                 Ok(_end_of_central_dir) => {}
                 Err(err) => {
@@ -329,7 +331,7 @@ fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
 
     println!(
         "Read {} out of {}",
-        stream_current_position(&mut src_file_reader)?,
+        stream_nav::current_position(&mut src_file_reader)?,
         stream_len
     );
 
@@ -337,7 +339,7 @@ fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
 }
 
 fn main() -> std::io::Result<()> {
-    let args = parse_args(&env::args().collect()).unwrap();
+    let args = input_parser::parse_args(&env::args().collect()).unwrap();
 
     println!("\nSource ZIP: {}", args.in_file);
     println!("Output dir: {}\n", args.out_folder);
@@ -369,6 +371,7 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use dir_diff;
     use std::path::Path;
 
     #[test]
