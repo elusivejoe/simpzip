@@ -1,10 +1,12 @@
+mod algorithms;
+
 use std::fs::File;
-use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, ErrorKind, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::stream_utils::{byte_readers, stream_nav};
 use crate::zip::structs::{CentralDirFileHeader, EndOfCentralDir, LocalFileHeader};
-use crate::zip::{feature_versions, signatures};
+use crate::zip::{compression_methods, feature_versions, signatures};
 
 fn read_signature<T: Read>(reader: &mut T) -> std::io::Result<u32> {
     let mut bytes = [0u8; 4];
@@ -215,35 +217,9 @@ fn read_end_of_central_dir<T: Read>(reader: &mut T) -> std::io::Result<EndOfCent
     Ok(result)
 }
 
-fn read_file_data<R: Read, W: Write>(
-    reader: &mut R,
-    writer: &mut W,
-    data_size: &u64,
-) -> std::io::Result<()> {
-    const CHUNK_SIZE: usize = 1024 * 1024;
-    let mut bytes_left = *data_size;
-
-    //TODO: verify checksum
-    while bytes_left > 0 {
-        let next_bytes = std::cmp::min(bytes_left, CHUNK_SIZE as u64);
-
-        if next_bytes == CHUNK_SIZE as u64 {
-            let mut bytes = [0u8; CHUNK_SIZE];
-            reader.read_exact(&mut bytes)?;
-
-            writer.write(&bytes)?;
-        } else {
-            //TODO: too many allocations here; consider passing reusable external buffer
-            let mut bytes = vec![0u8; next_bytes as usize];
-            reader.read_exact(&mut bytes)?;
-
-            writer.write(&bytes)?;
-        }
-
-        bytes_left -= next_bytes;
-    }
-
-    Ok(())
+fn is_folder(local_file_header: &LocalFileHeader) -> bool {
+    local_file_header.compression_method == compression_methods::STORE
+        && local_file_header.version_to_extract == feature_versions::DIR_OR_DEFLATE
 }
 
 pub fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
@@ -265,20 +241,23 @@ pub fn unpack_archive(src_file: &Path, out_dir: &Path) -> std::io::Result<()> {
         if signature == signatures::SIGNATURE_FILE_HEADER {
             match read_local_file_header(&mut src_file_reader) {
                 Ok(local_file_header) => {
-                    if local_file_header.version_to_extract == feature_versions::DIR {
+                    if is_folder(&local_file_header) {
                         std::fs::create_dir(out_dir.join(local_file_header.file_name))?;
                     } else {
                         let mut out_file =
                             File::create(out_dir.join(&local_file_header.file_name))?;
-
                         let mut buf_writer = BufWriter::new(&mut out_file);
+                        let stream_pos = stream_nav::current_position(&mut src_file_reader)?;
 
                         //TODO: extremely inefficient on a large amount of small files
-                        read_file_data(
-                            &mut src_file_reader,
-                            &mut buf_writer,
-                            &local_file_header.compressed_size,
-                        )?;
+                        algorithms::decompressor(&local_file_header.compression_method)
+                            .unwrap()
+                            .decompress(
+                                &mut src_file_reader,
+                                &mut buf_writer,
+                                &stream_pos,
+                                &local_file_header.compressed_size,
+                            )?;
                     }
                 }
                 Err(err) => {
@@ -350,5 +329,34 @@ mod tests {
         .unwrap());
 
         std::fs::remove_dir_all(out_folder).unwrap();
+    }
+
+    #[test]
+    fn unpack_deflate_normal_dict32kb_word32() {
+        unimplemented!("test is broken until Deflate is implemented");
+
+        /*let out_folder = Path::new("test-data/unpack_deflate/normal_dict32kb_word32/actual");
+
+        if out_folder.exists() && !out_folder.is_dir() {
+            assert!(false, "Output dir is not a dir.");
+        } else if out_folder.exists() {
+            std::fs::remove_dir_all(out_folder).unwrap();
+        }
+
+        std::fs::create_dir(out_folder).unwrap();
+
+        super::unpack_archive(
+            Path::new("test-data/unpack_deflate/normal_dict32kb_word32/input.zip"),
+            out_folder,
+        )
+        .unwrap();
+
+        assert!(!dir_diff::is_different(
+            out_folder,
+            Path::new("test-data/unpack_deflate/normal_dict32kb_word32/expected")
+        )
+        .unwrap());
+
+        std::fs::remove_dir_all(out_folder).unwrap();*/
     }
 }
